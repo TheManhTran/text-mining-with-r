@@ -1,0 +1,342 @@
+---
+title: "Text-mining"
+author: "Manh Tran"
+date: ""
+output: html_document
+---
+
+# Introduction
+
+If you are an analyst i think you are often learned to play with data that mostly in numeric. But now your company want to extract and classify information from text, such as tweets, emails, product reviews, and survey responses. And here the come of **tidytext** R package by **Silge and Robinson**, give us a great tool to generating insights from data that unstructured and text-heavy.
+
+## Load the libraries we’ll be using
+
+
+```{r load-libraries, warning=FALSE, message=FALSE}
+library(gutenbergr) # For downloading books from Project Gutenberg
+library(tidyverse) # For ggplot, dplyr, etc.
+library(tidytext) # For generating insights from the literature, news and social media
+library(cleanNLP) # For NLP analysis
+```
+## Get data 
+
+Using the **gutenbergr** package to download some books directly from Project Gutenberg. The IDs for these books come from the URLs at their website.
+```{r get-books, echo=TRUE}
+# 174 The Picture of Dorian Gray by Oscar Wilde
+The_Picture_of_Dorian_Gray_original <- gutenberg_download(174, meta_fields = "title")
+write_csv(The_Picture_of_Dorian_Gray_original, "data/The_Picture_of_Dorian_Gray_original.csv")
+```
+```{r load-text, echo=TRUE}
+read_csv("data/The_Picture_of_Dorian_Gray_original.csv")
+```
+## Clean up
+
+The book get from Project Gutenberg comes in a good format, with a column for the book id, a column for the title, and a column for text. But sometimes this is not, it all depends on how the book is formatted at Project Gutenberg, so make sure to check your data.
+
+Let see the book just get above
+
+```{r show-first-6-rows, echo=TRUE}
+head(The_Picture_of_Dorian_Gray_original)
+```
+If we look at the data by using **view(...)** we can see the hole dataset, and the first 57 rows are the table of contents and other parts of the front matter.
+
+Because i want to group by chapter for next analysis so i using the cumsum() function.
+
+```{r clean-data}
+The_Picture_of_Dorian_Gray <- The_Picture_of_Dorian_Gray_original %>% 
+  # The actual book doesn't start until line 58
+  slice(58:n()) %>% 
+  # Get rid of rows where text is missing
+  drop_na(text) %>% 
+  # Chapters start with CHAPTER X, so mark if each row is a chapter start
+  # cumsum() calculates the cumulative sum, so it'll increase every time 
+  # there's a new chapter and automatically make chapter numbers
+  mutate(chapter = str_detect(text, "^CHAPTER"),
+         chapter_number = cumsum(chapter)) %>% 
+  # Remove columns we don't need
+  select(-gutenberg_id, -title, -chapter)
+```
+
+## Tokens and counting words
+
+```{r tidy-text-format}
+word_frequencies <- The_Picture_of_Dorian_Gray %>%
+  # The unnest_tokens() functions from tidytext counts words 
+  # or bigram or paragraph to be in its own row
+  unnest_tokens(word, text) %>% 
+  # Remove stop words
+  anti_join(stop_words) %>% 
+  # use str_extract() here because the UTF-8 encoded texts 
+  # from Project Gutenberg have some examples of words with 
+  # underscores around them to indicate emphasis (like italics, 
+  # ex: count “_any_” separately from “any” not good for counting word).
+  mutate(word = str_extract(word, "[a-z']+")) %>% 
+  # Count all the words
+  count(word, sort = TRUE)
+```
+
+```{r plot-top-15}
+word_frequencies %>% 
+  # Keep top 15
+  top_n(15) %>%
+  # Make the words an ordered factor so they plot in order
+  mutate(word = fct_inorder(word)) %>% 
+  ggplot(aes(x = n, y = word))+
+  geom_col()
+```
+
+## Bigrams
+
+```{r tidy-bigrams}
+The_Picture_of_Dorian_Gray_bigrams <- The_Picture_of_Dorian_Gray %>% 
+  # n = 2 here means bigrams, trigrams (n = 3) or any type of n-gram
+  unnest_tokens(bigram, text, token = "ngrams", n = 2) %>% 
+  # Split the bigrams into two words so we can remove stopwords
+  separate(bigram, c("w1","w2"), sep = " ") %>% 
+  filter(!w1 %in% stop_words$word,
+         !w2 %in% stop_words$word) %>% 
+  # Put the two word columns back together
+  unite(bigram, w1, w2, sep = " ")
+```
+
+```{r counting-bigrams-plot-the-result}
+bigram_frequencies <- The_Picture_of_Dorian_Gray_bigrams %>% 
+  # Count all the bigrams
+  count(bigram, sort = TRUE)
+ 
+bigram_frequencies %>% 
+  top_n(15) %>%
+  mutate(bigram = fct_inorder(bigram)) %>% 
+  ggplot(aes(x = n, y = bigram))+
+  geom_col() +
+  labs(y = "Count", x = NULL, 
+       title = "15 most frequent bigrams")
+```
+
+## Scratch surface of part-of-speech tagging
+
+Using cleanNLP package for this analysis. In cleanNLP:
+**cnlp_init_udpipe()**: Use an R-only tagger that should work without installing anything extra (a little slower than the others, but requires no extra steps!)
+**cnlp_init_spacy()**: Use spaCy (if you’ve installed it on your computer with Python)
+**cnlp_init_corenlp()**: Use Stanford’s NLP library (if you’ve installed it on your computer with Java)
+
+```{r text-wrangling-with-dplyr}
+# For the tagger to work, each row needs to be unique, which means we need to
+# combine all the text into individual chapter-based rows. This takes a little
+# bit of text-wrangling with dplyr:
+The_Picture_of_Dorian_Gray_tag <- The_Picture_of_Dorian_Gray %>% 
+  # Group by chapter number
+  group_by(chapter_number) %>% 
+  # Take all the rows in each chapter and collapse them into a single cell
+  nest(data = c(text)) %>% 
+  ungroup() %>% 
+  # Look at each individual cell full of text lines and paste them together into
+  # one really long string of text per chapter
+  mutate(text = map_chr(data, ~paste(.$text, collapse = " "))) %>% 
+  # Get rid of this column
+  select(-data)
+The_Picture_of_Dorian_Gray_tag
+```
+
+```{r nlp-tag, eval=FALSE}
+# Use the built-in R-based tagger
+cnlp_init_udpipe()
+
+The_Picture_of_Dorian_Gray_tagged <- cnlp_annotate(The_Picture_of_Dorian_Gray_tag, 
+                                     text_name = "text", 
+                                     doc_name = "chapter_number")
+
+write_csv(The_Picture_of_Dorian_Gray_tagged$token, "data/The_Picture_of_Dorian_Gray_tagged.csv")
+```
+
+```{r load-tagged-text, echo=TRUE}
+The_Picture_of_Dorian_Gray_tagged <- read_csv("data/The_Picture_of_Dorian_Gray_tagged.csv")
+```
+
+```{r proper-nouns}
+# Find all proper nouns
+proper_nouns <- The_Picture_of_Dorian_Gray_tagged %>%
+  filter(upos == "PROPN")
+
+main_characters_by_chapter <- proper_nouns %>% 
+  # Find only Dorian , Hallward, Wotton, Sibyl, James and Alan 
+  filter(lemma %in% c("Dorian", "Hallward", "Wotton",
+                      "Sibyl","James", "Alan")) %>% 
+  # Group by chapter and character name
+  group_by(doc_id, lemma) %>% 
+  # Get the count of mentions
+  summarize(n = n()) %>% 
+  # Make a new column named "name" that is an ordered factor of the names
+  mutate(name = factor(lemma, levels = c("Dorian", "Hallward", "Wotton",
+                      "Sibyl","James", "Alan"), ordered = TRUE)) %>% 
+  # Rename this so it's called chapter
+  rename(chapter = doc_id) %>% 
+  # Group by chapter
+  group_by(chapter) %>% 
+  # Calculate the proportion of each name in each chapter
+  mutate(prop = n / sum(n)) %>% 
+  ungroup() %>% 
+  # Make a cleaner chapter name column
+  mutate(chapter_name = paste("Chapter", chapter)) %>% 
+  mutate(chapter_name = fct_inorder(chapter_name))
+main_characters_by_chapter
+```
+
+```{r props-plot, message = FALSE}
+ggplot(main_characters_by_chapter, aes(x = prop, y = 1, fill = fct_rev(name))) + 
+  geom_col(position = position_stack()) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_viridis_d(option = "plasma", end = 0.9, name = NULL) +
+  guides(fill = guide_legend(reverse = TRUE)) +
+  labs(x = NULL, y = NULL,
+       title = "Proportion of mentions of each character per chapter") +
+  facet_wrap(vars(chapter_name), nrow = 5) +
+  theme(legend.position = "top",
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        strip.background = element_rect(fill = "white"),
+        legend.text = element_text(face = "bold", size = rel(1)),
+        plot.title = element_text(face = "bold", hjust = 0.5, size = rel(1.7)),
+        plot.subtitle = element_text(hjust = 0.5, size = rel(1.1)))
+```
+
+Dorian basically dominates of the book. This is just the beginning of the long way to go with NLP, but i need time to dig deep with this. Of course here we can do anything we want went the data had tag.
+
+## Term frequency-inverse document frequency tf-idf
+
+$$
+\begin{aligned}
+tf(\text{term}) &= \frac{n_{\text{term}}}{n_{\text{terms in document}}} \\
+idf(\text{term}) &= \ln{\left(\frac{n_{\text{documents}}}{n_{\text{documents containing term}}}\right)} \\
+tf\text{-}idf(\text{term}) &= tf(\text{term}) \times idf(\text{term})
+\end{aligned}
+$$
+
+Here, to do this analysis, add some another books of Oscar Wilde
+
+```{r Oscar-Wilde-books}
+# The Importance of Being Earnest: A Trivial Comedy for Serious People
+  b2 <- gutenberg_download(844, meta_fields = "title")
+  b2_clean <- b2 %>% 
+    slice(5:n()) %>% 
+    drop_na(text)
+# 902: The Happy Prince, and Other Tales
+  b3 <- gutenberg_download(902, meta_fields = "title")
+  b3_clean <- b3 %>% 
+    slice(63:n()) %>% 
+    drop_na(text)
+# 885: An Ideal Husband
+  b4 <- gutenberg_download(885, meta_fields = "title")
+  b4_clean <- b4 %>% 
+    slice(29:n()) %>% 
+    drop_na(text)
+```
+
+```{r tidy-books}
+# Use bind_rows() from dplyr to bind multiple data by row
+  Oscar_Wilde_books <- bind_rows(b2_clean, b3_clean, b4_clean)
+  
+  book_words <- Oscar_Wilde_books %>% 
+    unnest_tokens(word, text) %>% 
+    anti_join(stop_words) %>% 
+    # use str_extract() here because the UTF-8 encoded texts 
+    # from Project Gutenberg have some examples of words with 
+    # underscores around them to indicate emphasis (like italics, 
+    # ex: count “_any_” separately from “any” not good for counting word).
+    mutate(word = str_extract(word, "[a-z']+")) %>% 
+    count(title, word, sort = TRUE)
+```
+
+```{r get-top-10-plot}
+# find the words most distinctive to each document
+book_words_tf_idf <-  book_words %>% 
+  bind_tf_idf(word, title, n)
+# Get the top 10 uniquest words
+book_words_10 <- book_words_tf_idf %>% 
+  arrange(desc(tf_idf)) %>% 
+  group_by(title) %>% 
+  top_n(10) %>% 
+  ungroup() %>% 
+  mutate(word = fct_inorder(word))
+# Plot
+ggplot(book_words_10, 
+       aes(y = fct_rev(word), x = tf_idf, fill = title)) +
+  geom_col() +
+  guides(fill = FALSE) +
+  labs(x = "tf-idf", y = NULL) +
+  facet_wrap(~ title, scales = "free") +
+  theme_bw()
+```
+
+## Sentiment analysis (sa)
+
+To see what the different dictionaries look like using get_sentiments()
+get_sentiments("afinn")  # Scoring system
+get_sentiments("bing")  # Negative/positive
+get_sentiments("nrc")  # Specific emotions
+get_sentiments("loughran")  # Designed for financial statements; positive/negative
+
+ 
+Split into word tokens
+
+```{r word-tokens}
+The_Picture_of_Dorian_Gray_new <- The_Picture_of_Dorian_Gray %>%
+  unnest_tokens(word, text)
+```
+
+Join the sentiment dictionary
+
+```{r sentiment-joining}
+The_Picture_of_Dorian_Gray_sa <- The_Picture_of_Dorian_Gray_new %>%
+  inner_join(get_sentiments("bing"))
+```
+
+Get a count of postiive and negative words in each chapter. Convert the sentiment column into two columns named "positive" and "negative"
+
+```{r plot-result}
+sentiment_analysis_chapter <- The_Picture_of_Dorian_Gray_sa %>% 
+  # Get a count of postiive and negative words in each chapter 
+  count(chapter_number, sentiment) %>% 
+  # Convert the sentiment column into two columns named "positive" and "negative"
+  pivot_wider(names_from = sentiment, values_from = n) %>% 
+  # Calculate net sentiment
+  mutate(net_sentiment = positive - negative)
+  # Plot it
+  sentiment_analysis_chapter %>% 
+    ggplot(aes(x = chapter_number, y = net_sentiment)) +
+    geom_line()
+```
+
+Another way, by splitting the data into groups of lines, to show a more granular view of the progression of the plot
+
+```{r range-analysis}
+sentiment_analysis_range <- The_Picture_of_Dorian_Gray_sa %>% 
+  mutate(line_number = row_number()) %>% 
+  # Divide lines into groups of 100
+  mutate(index = line_number %/% 100) %>% 
+  # Get a count of postiive and negative words in each 100-line chunk
+  count(index, sentiment) %>% 
+  # Convert the sentiment column into two columns named "positive" and "negative"
+  pivot_wider(names_from = sentiment, values_from = n) %>% 
+  # Calculate net sentiment
+  mutate(net_sentiment = positive - negative)
+  # Plot it
+  sentiment_analysis_range %>% 
+    ggplot(aes(x = index, y = net_sentiment)) +
+    geom_col(aes(fill = net_sentiment > 0))
+```
+
+Well, sad story!
+
+### References
+
+[Text Mining with R: Julia Silge and David Robinson](https://www.tidytextmining.com/)
+[Dr. Andrew Heiss](https://datavizm20.classes.andrewheiss.com/example/13-example/)
+[Project Gutenberg](https://www.gutenberg.org/ebooks/author/111)
+
+
+
+
+
+
